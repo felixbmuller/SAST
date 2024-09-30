@@ -1,0 +1,12 @@
+pytorch_lightning==2.4.0
+numpy==2.1.1
+torch==2.4.1
+tqdm==4.66.5
+fire==0.6.0
+einops==0.8.0
+git+https://github.com/jutanke/hik.git
+scipy==1.14.1
+diffusers==0.30.3
+yacs==0.1.8
+tensorboard==2.18.0
+-e .
