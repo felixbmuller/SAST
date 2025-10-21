@@ -41,13 +41,19 @@ This will create a file `eval.pkl` that can be analyzed using Humans in Kitchens
 If you found this repository useful, please cite
 
 ```
-@misc{mueller2024sast,
-      title={Massively Multi-Person 3D Human Motion Forecasting with Scene Context}, 
-      author={Felix B Mueller and Julian Tanke and Juergen Gall},
-      year={2024},
-      eprint={2409.12189},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2409.12189}, 
+@inproceedings{mueller2024sast,
+  author       = {Felix B. Mueller and
+                  Julian Tanke and
+                  Juergen Gall},
+  title        = {Massively Multi-person 3D Human Motion Forecasting with Scene Context},
+  booktitle    = {Computer Vision - {ECCV} 2024 Workshops - Milan, Italy, September
+                  29-October 4, 2024, Proceedings, Part {XV}},
+  series       = {Lecture Notes in Computer Science},
+  volume       = {15637},
+  pages        = {130--147},
+  publisher    = {Springer},
+  year         = {2024},
+  url          = {https://doi.org/10.1007/978-3-031-91581-9\_10},
+  doi          = {10.1007/978-3-031-91581-9\_10},
 }
 ```
