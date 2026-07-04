@@ -34,7 +34,9 @@ Generate model outputs for all sequences in the Humans in Kitchens evaluation se
 python eval.py path/to/model data/
 ```
 
-This will create a file `eval.pkl` that can be analyzed using Humans in Kitchens evaluation code.
+This will create a file `eval.pkl` that can be analyzed using Humans in Kitchens evaluation code. 
+
+`metric_calculation.py` documents how we calculate the metrics reported in the paper based on the eval files of our and baseline models. You probably need to adjust paths to files to run the script.
 
 ## Reference
 
