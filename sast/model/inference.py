@@ -23,7 +23,7 @@ def multi_eval_fn(
 
     :param persons_in: {n_persons x n_in x 17 x 3}
     :param masks_in: {n_persons x n_in}
-    :param scene: {bam_poses.data.scene.Scene}
+    :param scene: {hik.data.scene.Scene}
     :param frame: {int}
     :param n_in: {int}
     :param pids: {List[int]}

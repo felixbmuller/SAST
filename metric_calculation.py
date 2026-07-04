@@ -7,7 +7,7 @@ import logging
 import pickle
 import scipy
 
-from bam_poses.eval import EvalNDMS, Evaluation, load_results, save_results
+from hik.eval import EvalNDMS, Evaluation, load_results, save_results
 from sast.realism_classifier.model import RealismClassifier
 from sast.metrics import calculate_ndms_k, calculate_means, unique_ratios
 from sast.utils import startup

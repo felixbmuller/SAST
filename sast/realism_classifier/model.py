@@ -64,7 +64,7 @@ def batch_normalize(seq, frame: int):
 
 def test_batch_normalize():
 
-    from bam_poses.transforms import normalize
+    from hik.transforms import normalize
 
     seq = torch.randn(5, 250, 17, 3, dtype=torch.float32)
 
