@@ -14,13 +14,37 @@ pip install -r requirements.txt
 
 Download the [Humans in Kitchens](https://github.com/jutanke/hik/tree/main) and unpack its content to `data/`, such that `data/` contains `poses/`, `scenes/`, and `body_models/`.
 
+### Preprocessing
+
 Preprocess the dataset using
 
 ```
-python sast/data/multi_person_data.py hik SAST.yaml 
+python sast/data/multi_person_data.py hik SAST.yaml --splits_per_batch=256
 ```
 
 This will load pose information from Humans in Kitchens and store them at `data/hik_[ABC]`.
+
+**Note:** The final model in the paper uses a stride (`cfg.data.seq_offset`) of 50 frames for generating 304 frame sequences, i.e. heavily overlapping sequences. For initial experiments, I suggest using  `cfg.data.seq_offset=304` for faster extraction and training. Extracting at stride 50 requires around 100 GB of disk space.
+
+If the extraction requires too much RAM, use a lower `--splits_per_batch`. 
+
+You can parallelize extraction:
+
+```
+python sast/data/multi_person_data.py hik SAST.yaml --n_shards=4 --shards=0
+python sast/data/multi_person_data.py hik SAST.yaml --n_shards=4 --shards=1
+python sast/data/multi_person_data.py hik SAST.yaml --n_shards=4 --shards=2
+python sast/data/multi_person_data.py hik SAST.yaml --n_shards=4 --shards=3
+```
+
+If you use sharding, you need to adjust `SAST.yaml` to load all shards for training:
+
+```yaml
+loader:
+  dataset_parts: ["A_s0", "A_s1", "A_s2", "A_s3", "B_s0", ..., "C_s3"]
+```
+
+### Training and evaluation
 
 Train the model with 
 

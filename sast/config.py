@@ -35,8 +35,16 @@ cfg.data.frames_out = 279
 
 cfg.data.object_frame = 24
 
-# offset between scene (i.e. anti-overlap)
-cfg.data.seq_offset = 25
+# stride of the sliding window used to cut sequences out of the recordings.
+# Note that this is *smaller* than frames_in + frames_out, i.e. windows overlap
+# and every frame ends up in (frames_in + frames_out) / seq_offset sequences.
+# This drives the size of the generated dataset on disk, but not the memory
+# needed to generate it (see splits_per_batch in create_dataset for that).
+cfg.data.seq_offset = 50
+
+# number of different random object point-cloud samplings stored per person.
+# One of them is drawn at random in MultiPersonData.__getitem__.
+cfg.data.object_embeds = 8
 
 cfg.data.n_chunks = 10
 

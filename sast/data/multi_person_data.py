@@ -1,4 +1,3 @@
-import itertools
 from types import SimpleNamespace
 import logging
 import multiprocessing
@@ -13,6 +12,7 @@ from fire import Fire
 from einops import rearrange
 
 from hik.data.scene import Scene
+from hik.data.utils import get_splits as hik_get_splits
 from hik.transforms.transforms import (
     normalize,
     apply_normalization_to_seq,
@@ -31,40 +31,42 @@ from sast.utils import startup, log_exception
 
 BASIS_POINT_SET = BasisPointSet()
 
+# On-disk dtypes. `others` and `objects` dominate the dataset size (~95% of it),
+# so they are stored as fp16 and cast back to fp32 in __getitem__. `primary` is
+# the regression target and stays fp32.
+STORAGE_DTYPES = {
+    "primary": "float32",
+    "primary_exists": "float32",
+    "others": "float16",
+    "others_exists": "bool",
+    "objects": "float16",
+    "activities": "float32",
+}
 
-def _load_dataset(dataset: str, cfg):
+# Set once per pool worker instead of being pickled with every single task.
+_WORKER_KITCHEN = None
+
+
+def _init_worker(kitchen):
+    global _WORKER_KITCHEN
+    _WORKER_KITCHEN = kitchen
+
+
+def _load_scene(dataset: str, cfg) -> Scene:
     data_location = cfg.data.hik_location
 
-    scene = Scene.load_from_paths(
+    return Scene.load_from_paths(
         dataset,
         data_location + "/poses/",
         data_location + "/scenes/",
         data_location + "/body_models/",
     )
 
-    n_in = cfg.data.frames_in
-    n_out = cfg.data.frames_out
 
-    splits = scene.get_splits(
-        n_in + n_out,
-        stepsize=cfg.data.seq_offset,
+def _memmap(save_path, name, shape):
+    return np.lib.format.open_memmap(
+        f"{save_path}/{name}.npy", mode="w+", shape=shape, dtype=STORAGE_DTYPES[name]
     )
-
-    poses = rearrange(splits["poses3d"], "b t p j d -> b p t j d")
-    masks = rearrange(splits["masks"], "b t p -> b p t")
-    start_frames = splits["start_frames"]
-    activities = rearrange(splits["activities"], "b t p act -> b p t act")
-
-    frames = [
-        np.arange(start_frame, start_frame + n_in + n_out)
-        for start_frame in start_frames
-    ]
-
-    assert np.isfinite(poses[masks > 0.99]).all()
-
-    logging.info(f"Loaded dataset {dataset} with shape {poses.shape}")
-
-    return poses, masks, frames, activities, scene
 
 
 def pad_sequence(poses, exists):
@@ -116,9 +118,9 @@ def preprocess_sequences(
     present,
     frames,
     activities,
-    kitchen,
-    object_frame,
-    normalize_frame,
+    kitchen=None,
+    object_frame=None,
+    normalize_frame=None,
     max_persons=max_persons_simultaneous,
     different_object_embeds=8,
     return_normalization=True,
@@ -150,6 +152,9 @@ def preprocess_sequences(
         global frames for this sequence
     activities: (p t act)
         activities
+    kitchen: Kitchen
+        scene geometry. If None, the kitchen set by _init_worker() is used, which
+        avoids re-pickling it for every single sequence when running in a Pool.
     object_frame: int
         local frame where to extract objects. If frames=None, this is assumed to be the global frame instead.
     normalize_frame: int
@@ -178,6 +183,9 @@ def preprocess_sequences(
 
     if progress_indicator:
         print(".", end="", flush=True)
+
+    if kitchen is None:
+        kitchen = _WORKER_KITCHEN
 
     n_persons, n_frames, n_joints, n_dim = persons.shape
 
@@ -309,92 +317,173 @@ def create_objects(objs_norm_pointclouds, objs_labels):
 class MultiPersonData(data.Dataset):
 
     @classmethod
-    def load_from_hik(
+    def create_to_files(
         cls,
         cfg,
-        load_only=None,
+        dataset,
+        save_path,
+        shard=0,
+        n_shards=1,
+        splits_per_batch=256,
     ):
-        """ """
+        """
+        Build the dataset for one scene directly into memory-mapped .npy files.
 
-        logging.info("Loading datasets")
+        Nothing is ever held in RAM in full: the sliding windows are sliced out of
+        the Scene arrays on demand, processed `splits_per_batch` at a time, and
+        written straight to their final location. Peak memory is therefore set by
+        `splits_per_batch` alone (roughly splits_per_batch * n_persons * 5 MB) and
+        does not grow with seq_offset.
 
-        with multiprocessing.get_context("spawn").Pool(cfg.loader.num_workers) as pool:
-            # if True:
+        Parameters
+        ----------
+        shard, n_shards : int
+            Take only every n_shards-th window, starting at `shard`. The union over
+            all shards is exactly the full set of windows, so this splits one
+            dataset into n_shards independent runs (and n_shards output directories,
+            to be listed together in cfg.loader.dataset_parts) without changing
+            what gets generated. Use it to trade wall-clock for peak memory.
+        """
 
-            print("workers", cfg.loader.num_workers)
+        n_joints = cfg.data.n_joints
+        n_embeds = cfg.data.object_embeds
+        length = cfg.data.frames_in + cfg.data.frames_out
 
-            if load_only is not None:
-                datasets = [_load_dataset(load_only, cfg)]
+        logging.info(f"Loading scene {dataset}")
 
-            else:
+        scene = _load_scene(dataset, cfg)
 
-                datasets = pool.starmap(
-                    _load_dataset,
-                    (("A", cfg), ("B", cfg), ("C", cfg)),
-                )
-
-            logging.info("Preprocess sequences in parallel")
-
-            total = sum(d[0].shape[0] for d in datasets)
-
-            data_iter = itertools.chain.from_iterable(
-                (
-                    zip(
-                        poses,
-                        masks,
-                        frames,
-                        activities,
-                        itertools.repeat(scene.kitchen),
-                    )
-                    for poses, masks, frames, activities, scene in datasets
-                )
-            )
-
-            map_func = functools.partial(
-                preprocess_sequences,
-                object_frame=cfg.data.object_frame,
-                normalize_frame=normalize_frame,
-                return_normalization=False,
-                progress_indicator=True,
-            )
-
-            sequences = pool.starmap(map_func, data_iter, chunksize=100)
-
-        del datasets
-
-        self = SimpleNamespace()
-
-        logging.info("Concatenating primary")
-        self.primary = np.concatenate([r.pop("primary") for r in sequences])
-        logging.info("Concatenating primary_exists")
-        self.primary_exists = np.concatenate(
-            [r.pop("primary_exists") for r in sequences]
+        starts = hik_get_splits(
+            scene.frames, length=length, stepsize=cfg.data.seq_offset
         )
-        logging.info("Concatenating others")
-        self.others = np.concatenate([r.pop("others") for r in sequences])
-        logging.info("Concatenating others_exists")
-        self.others_exists = np.concatenate([r.pop("others_exists") for r in sequences])
+        starts = starts[shard::n_shards]
 
-        logging.info("Concatenating objects")
-        self.objects = np.concatenate([r.pop("objects") for r in sequences])
+        # Check finiteness once over the frames we are about to use, rather than
+        # over a fully materialised (and heavily duplicated) array of windows.
+        used_frames = np.zeros(len(scene.masks), dtype="bool")
+        for start_frame in starts:
+            used_frames[start_frame : start_frame + length] = True
+        assert np.isfinite(
+            scene.poses3d[(scene.masks != 0) & used_frames[:, None]]
+        ).all()
 
-        logging.info("Concatenating activities")
-        self.activities = np.concatenate([r.pop("activities") for r in sequences])
+        # The number of output rows varies per window (only persons that are
+        # present at least once are kept), but it depends solely on the mask
+        # array, which is small enough to scan up front.
+        total = sum(
+            int(np.any(scene.masks[s : s + length] != 0, axis=0).sum())
+            for s in starts
+        )
 
         logging.info(
-            "dataset size (number of primary persons) " + str(self.primary.shape[0])
+            f"{dataset} shard {shard}/{n_shards}: {len(starts)} windows "
+            f"-> {total} primary persons"
         )
 
-        del sequences
+        os.makedirs(save_path)
 
-        logging.info("Calculate metrics")
-        if load_only is None:
-            self.data_mean = np.mean(self.primary, axis=(0, 1))
-            self.data_std = np.std(self.primary, axis=(0, 1))
+        if cfg is not None:
+            with open(f"{save_path}/cfg.yaml", "w") as fp:
+                fp.write(cfg.dump())
 
-        logging.info("Data loading complete")
+        out = {
+            "primary": _memmap(save_path, "primary", (total, length, n_joints, 3)),
+            "primary_exists": _memmap(save_path, "primary_exists", (total, length)),
+            "others": _memmap(
+                save_path,
+                "others",
+                (total, max_persons_simultaneous - 1, length, n_joints, 3),
+            ),
+            "others_exists": _memmap(
+                save_path, "others_exists", (total, max_persons_simultaneous - 1)
+            ),
+            "objects": _memmap(
+                save_path,
+                "objects",
+                (total, n_embeds, max_objects_per_scene, object_embed_dim),
+            ),
+            "activities": _memmap(
+                save_path, "activities", (total, length, len(activity2index))
+            ),
+        }
 
-        return cls(self, cfg)
+        map_func = functools.partial(
+            preprocess_sequences,
+            object_frame=cfg.data.object_frame,
+            normalize_frame=normalize_frame,
+            different_object_embeds=n_embeds,
+            return_normalization=False,
+        )
+
+        primary_min = np.full((n_joints, 3), np.inf, dtype="float32")
+        primary_max = np.full((n_joints, 3), -np.inf, dtype="float32")
+
+        written = 0
+
+        ctx = multiprocessing.get_context("spawn")
+
+        with ctx.Pool(
+            cfg.loader.num_workers,
+            initializer=_init_worker,
+            initargs=(scene.kitchen,),
+        ) as pool:
+
+            for i in tqdm(range(0, len(starts), splits_per_batch)):
+
+                tasks = [
+                    (
+                        rearrange(scene.poses3d[s : s + length], "t p j d -> p t j d"),
+                        rearrange(scene.masks[s : s + length], "t p -> p t"),
+                        np.arange(s, s + length),
+                        rearrange(
+                            scene.activities[s : s + length], "t p act -> p t act"
+                        ),
+                    )
+                    for s in starts[i : i + splits_per_batch]
+                ]
+
+                # keep every worker busy even when the batch is small
+                chunksize = max(1, min(8, len(tasks) // (cfg.loader.num_workers * 4)))
+
+                for res in pool.starmap(map_func, tasks, chunksize=chunksize):
+
+                    n = res["primary"].shape[0]
+
+                    if n == 0:
+                        continue
+
+                    np.minimum(
+                        primary_min, res["primary"].min(axis=(0, 1)), out=primary_min
+                    )
+                    np.maximum(
+                        primary_max, res["primary"].max(axis=(0, 1)), out=primary_max
+                    )
+
+                    for k, arr in out.items():
+                        # fp32 -> fp16 for `others` and `objects` happens here
+                        arr[written : written + n] = res.pop(k)
+
+                    written += n
+
+                del tasks
+
+        assert written == total, f"{written=} != {total=}"
+
+        for arr in out.values():
+            arr.flush()
+
+        if total == 0:
+            # would otherwise write +-inf and poison the range in load_from_files
+            logging.warning(f"{save_path} is empty, no windows in this shard")
+            primary_min[:] = 0.0
+            primary_max[:] = 0.0
+
+        # Saved so that load_from_files() does not have to stream every primary.npy
+        # from disk on each start-up just to recover the normalization range.
+        np.save(f"{save_path}/primary_min.npy", primary_min)
+        np.save(f"{save_path}/primary_max.npy", primary_max)
+
+        logging.info(f"Wrote {total} primary persons to {save_path}")
 
     @classmethod
     def load_from_file(cls, save_path):
@@ -419,11 +508,18 @@ class MultiPersonData(data.Dataset):
     def load_from_files(cls, save_path, parts, data_mask_func=None):
 
         datasets = []
+        mins = []
+        maxs = []
 
         for dataset in parts:
             this_save_path = save_path + "_" + dataset
 
             dataset_instance = MultiPersonData.load_from_file(this_save_path)
+
+            # Precomputed by create_to_files(), so we do not have to read every
+            # primary.npy in full just to get the normalization range.
+            mins.append(np.load(f"{this_save_path}/primary_min.npy"))
+            maxs.append(np.load(f"{this_save_path}/primary_max.npy"))
 
             if data_mask_func is not None:
 
@@ -439,13 +535,6 @@ class MultiPersonData(data.Dataset):
             datasets.append(dataset_instance)
 
         combined = data.ConcatDataset(datasets)
-
-        mins = []
-        maxs = []
-
-        for dataset in datasets:
-            mins.append(np.min(dataset.dataset.data.primary, axis=(0, 1)))
-            maxs.append(np.max(dataset.dataset.data.primary, axis=(0, 1)))
 
         global_min = np.min(np.stack(mins), axis=0)
         global_max = np.max(np.stack(maxs), axis=0)
@@ -470,17 +559,6 @@ class MultiPersonData(data.Dataset):
     def get_std(self):
         return self.data.data_std
 
-    def save(self, save_path):
-
-        os.makedirs(save_path)
-
-        if self.cfg is not None:
-            with open(f"{save_path}/cfg.yaml", "w") as fp:
-                fp.write(self.cfg.dump())
-
-        for k, v in tqdm(vars(self.data).items()):
-            np.save(f"{save_path}/{k}.npy", v)
-
     def __getitem__(self, idx):
         """
 
@@ -497,9 +575,10 @@ class MultiPersonData(data.Dataset):
         ret = {
             "primary": self.data.primary[idx],
             "primary_exists": self.data.primary_exists[idx],
-            "others": self.data.others[idx],
+            # stored as fp16 on disk, see STORAGE_DTYPES
+            "others": self.data.others[idx].astype("float32"),
             "others_exists": self.data.others_exists[idx],
-            "objects": self.data.objects[idx, obj_idx],
+            "objects": self.data.objects[idx, obj_idx].astype("float32"),
         }
 
         return ret
@@ -508,36 +587,73 @@ class MultiPersonData(data.Dataset):
         return self.data.primary.shape[0]
 
 
-def create_dataset(save_name, cfg_path, datasets="ABC"):
+def create_dataset(
+    save_name,
+    cfg_path,
+    datasets="ABC",
+    n_shards=1,
+    shards=None,
+    splits_per_batch=256,
+):
+    """
+    Parameters
+    ----------
+    n_shards : int
+        Split each scene into this many independent runs, each covering every
+        n_shards-th sliding window. The union is identical to a single run, but
+        each run touches 1/n_shards of the data. Every shard becomes its own
+        output directory; list them all in cfg.loader.dataset_parts.
+    shards : int | tuple[int] | None
+        Which shards to build in this invocation. None builds all of them
+        sequentially. Pass e.g. --shards=0,1 to build a subset (useful for
+        spreading the shards over several jobs).
+    splits_per_batch : int
+        How many sliding windows are processed before the results are flushed to
+        disk. This is the only knob controlling peak memory.
+    """
 
     cfg = startup(cfg_path)
 
+    if shards is None:
+        shards = list(range(n_shards))
+    elif isinstance(shards, int):
+        shards = [shards]
+    else:
+        shards = list(shards)
+
+    parts = []
+
     for dataset in datasets:
-        # if True:
+        for shard in shards:
 
-        logging.info("Loading data " + dataset)
+            part = dataset if n_shards == 1 else f"{dataset}_s{shard}"
+            parts.append(part)
 
-        data = MultiPersonData.load_from_hik(cfg, load_only=dataset)
+            save_path = f"{cfg.loader.dataset_path}/{save_name}_{part}"
 
-        logging.info("Saving data")
+            logging.info(f"Creating data {part} in {save_path}")
 
-        save_path = f"{cfg.loader.dataset_path}/{save_name}_{dataset}"
+            MultiPersonData.create_to_files(
+                cfg,
+                dataset,
+                save_path,
+                shard=shard,
+                n_shards=n_shards,
+                splits_per_batch=splits_per_batch,
+            )
 
-        data.save(save_path)
+            logging.info("Reloading data")
 
-        logging.info("Reloading data")
+            data = MultiPersonData.load_from_file(save_path)
 
-        del data
+            print("length: " + str(len(data)))
 
-        data = MultiPersonData.load_from_file(save_path)
+            pprint({k: v.shape for k, v in data[0].items()})
 
-        logging.info("Reloaded data")
+            del data
 
-        print("length: " + str(len(data)))
-
-        pprint({k: v.shape for k, v in data[0].items()})
-
-        del data
+    print("\nSet cfg.loader.dataset_parts to:")
+    pprint(parts)
 
 
 if __name__ == "__main__":
