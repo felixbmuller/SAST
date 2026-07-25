@@ -27,8 +27,9 @@ def batch_normalize(seq, frame: int):
 
     #print("DIMS", str(seq.shape))
 
-    left3d = seq[:, frame, 13] # b d
-    right3d = seq[:, frame, 14] # b d
+    # hip joints in hik's 29-joint layout (matches hik.transforms normalize jid_left/right)
+    left3d = seq[:, frame, 1]  # b d
+    right3d = seq[:, frame, 2]  # b d
 
     mu = (left3d + right3d) / 2  # batch dim
     mu[:, 2] = 0
@@ -64,9 +65,9 @@ def batch_normalize(seq, frame: int):
 
 def test_batch_normalize():
 
-    from hik.transforms import normalize
+    from hik.transforms.transforms import normalize
 
-    seq = torch.randn(5, 250, 17, 3, dtype=torch.float32)
+    seq = torch.randn(5, 250, 29, 3, dtype=torch.float32)
 
     seq[..., 2] = torch.abs(seq[..., 2])
     seq[..., :2] = seq[..., :2] * 10
@@ -76,6 +77,7 @@ def test_batch_normalize():
     reference_seq_ = []
 
     for b in range(5):
+        # batch_normalize follows hik's 29-joint normalization (hips at 1/2).
         ref_seq = normalize(seq[b].numpy(), 0)
 
         reference_seq_.append(ref_seq)
@@ -225,7 +227,7 @@ def visualize_model(
 
     summary(
         model,
-        # input_size=[(cfg.loader.batch_size, 17 * 3, 256), (cfg.loader.batch_size,)],
+        # input_size=[(cfg.loader.batch_size, 29 * 3, 256), (cfg.loader.batch_size,)],
         row_settings=["var_names"],
         depth=depth,
     )

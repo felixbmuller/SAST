@@ -3,7 +3,7 @@ from yacs.config import CfgNode
 
 cfg = CfgNode()
 
-cfg.n_joints = 17
+cfg.n_joints = 29
 cfg.n_frames = 50
 cfg.n_hidden_temporal = 32
 cfg.n_hidden_final = 512

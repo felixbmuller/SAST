@@ -21,7 +21,7 @@ def multi_eval_fn(
     Callback for generating results. The model predicts the
     data in here. This is compatible with the way Humans in Kitchens provides data.
 
-    :param persons_in: {n_persons x n_in x 17 x 3}
+    :param persons_in: {n_persons x n_in x 29 x 3}
     :param masks_in: {n_persons x n_in}
     :param scene: {hik.data.scene.Scene}
     :param frame: {int}
