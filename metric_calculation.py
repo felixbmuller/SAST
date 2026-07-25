@@ -1,41 +1,59 @@
+import sast.env  # noqa: F401  isort:skip -- must precede torch/numba imports
 
 import pandas as pd
 import numpy as np
 import torch
+import torch.utils.data as torch_data
 from pathlib import Path
 import logging
-import pickle
 import scipy
 
-from hik.eval import load_results, save_results
-from sast.ndms_eval import NDMSEvaluator
+from bam_poses.eval import EvalNDMS, Evaluation, load_results, save_results
 from sast.realism_classifier.model import RealismClassifier
+from sast.realism_classifier.data import process_eval_pkl
 from sast.metrics import calculate_ndms_k, calculate_means, unique_ratios
 from sast.utils import startup
 
 data_dir = "output/"
 
-# Root of the hik dataset (contains poses/, scenes/, body_models/), same layout
-# that eval.py passes to hik.eval.Evaluator. Needed to build the NDMS databases.
-hik_data_path = "data/"
+# Root of the BAM-poses dataset, same as cfg.data.bam_location. Needed to build
+# the NDMS motion-word databases.
+bam_data_path = "data/dataset/"
 
-test_files = {
-    "SiMLPe": "mlp_D_test_seq.pkl",
-    "MRT": "mrt_D_test_seq.pkl",
-    "Ours": "Ours_D_test_seq.pkl",
-    "TriPod": "tripod_D_test_seq.pkl",
-    "HisRep": "hisrep_D_test_seq.pkl",
-    "GT": "gt_test_seq.pkl"
+tmp_dir = "tmp_sast/"
+
+device = "cuda"
+
+# eval.py output (or the equivalent for a baseline), and the number of observed
+# frames that model was given. n_in matters for the NDMS metrics, which have to
+# skip the motion words that still overlap the observed sequence.
+eval_files = {
+    "SiMLPe": ("mlp_D.pkl", 50),
+    "MRT": ("mrt_D.pkl", 25),
+    "Ours": ("Ours_D.pkl", 25),
+    "TriPod": ("tripod_D.pkl", 25),
+    "HisRep": ("hisrep_D.pkl", 50),
 }
 
 ## Realism Scores
 
-device = "cuda"
 model = RealismClassifier.load("realism_classifier.pth", device)
 
-def calc_per_second(path):
-    data = torch.load(f"{data_dir}/{path}")
-    preds = model.forward_seq(data, device=device)
+
+def calc_per_second(path, gt=False):
+    seqs = process_eval_pkl(path, gt=gt)
+
+    # Score the 84% test split only: the classifier was trained on the
+    # complementary 16% of the sequences of the models it was fitted against, so
+    # scoring everything would report partly on its own training data. Same
+    # generator seed and proportions as
+    # sast.realism_classifier.data.synthetic_whole_sequences, which is what
+    # produced the *_test_seq.pkl files this used to read. Applied to every
+    # model so they are all scored on the same subset.
+    gen = torch.Generator().manual_seed(42)
+    _, test = torch_data.random_split(seqs, [0.16, 0.84], generator=gen)
+
+    preds = model.forward_seq(test, device=device)
     results = np.stack([t.numpy() for t in preds])
 
     means = {}
@@ -48,9 +66,13 @@ def calc_per_second(path):
 
 means = {}
 
-for file in test_files.values():
-    raw, m = calc_per_second(file)
-    means[file.removesuffix("_test_seq.pkl")] = m
+for name, (file, _) in eval_files.items():
+    raw, m = calc_per_second(data_dir + file)
+    means[name] = m
+
+# ground truth motion, for reference. Any eval file will do, they all carry the
+# same ground-truth futures.
+_, means["GT"] = calc_per_second(data_dir + eval_files["Ours"][0], gt=True)
 
 means_df = pd.DataFrame(means)
 print(means_df)
@@ -58,7 +80,7 @@ print(means_df)
 ## NDMS-based metrics
 
 # Apply NDMS calculation
-def eval_ndms(ndms_evaluator, results_path):
+def eval_ndms(ndms, results_path):
 
     results_path = Path(results_path)
 
@@ -66,7 +88,7 @@ def eval_ndms(ndms_evaluator, results_path):
 
     logging.info("Running NDMS for %s", results_path.name)
 
-    avg_ndms, avg_indices = ndms_evaluator.run(results)
+    avg_ndms, avg_indices = ndms.run(results)
 
     logging.info("Saving results")
 
@@ -78,26 +100,30 @@ def eval_ndms(ndms_evaluator, results_path):
 
     logging.info("done")
 
-startup()
+startup(no_config=True)
 
-ndms_evaluator = NDMSEvaluator(dataset="D", data_path=hik_data_path, cache_dir="tmp_sast/")
+ev = Evaluation(
+    dataset="D",
+    data_location=bam_data_path,
+    tmp_dir=tmp_dir,
+    n_in=25,
+    n_out=250,
+)
+ndms = EvalNDMS(ev)
 
-for k, v in test_files.items():
-    eval_ndms(ndms_evaluator, data_dir + v)
-
-
-eval_files = {
-    "MRT": ("output/mrt_D_test_seq", 25),
-    "HisRep": ("output/hisrep_D_test_seq", 50),
-    "SiMLPe": ("output/mlp_D_test_seq", 50),
-    "TriPod": ("output/tripod_D_test_seq", 25),
-    "Ours": ("output/Ours_D_test_seq", 25),
-}
+for name, (file, _) in eval_files.items():
+    eval_ndms(ndms, data_dir + file)
 
 
 ## Aggregate NDMS, calculate NDMS@k
 
-results_ndms = {k : calculate_means(load_results(v + "_ndms.pkl"), n_in) for k, (v, n_in) in eval_files.items()}
+# eval_ndms() wrote these next to their input, as <stem>_ndms.pkl
+ndms_stems = {
+    name: (data_dir + Path(file).stem, n_in)
+    for name, (file, n_in) in eval_files.items()
+}
+
+results_ndms = {k : calculate_means(load_results(v + "_ndms.pkl"), n_in) for k, (v, n_in) in ndms_stems.items()}
 
 ndmsk_df = calculate_ndms_k(results_ndms)
 
@@ -105,7 +131,7 @@ print(ndmsk_df)
 
 ## UMWR
 
-umwr_df = pd.DataFrame({k: unique_ratios(load_results(v + "_ndms_indices.pkl"), n_in) for k, (v, n_in) in eval_files.items()})
+umwr_df = pd.DataFrame({k: unique_ratios(load_results(v + "_ndms_indices.pkl"), n_in) for k, (v, n_in) in ndms_stems.items()})
 
 print(umwr_df)
 
@@ -117,7 +143,7 @@ def total_distance_dist(eval, gt=False):
     for cat, data in eval.items():
         for sample in data:
             sample = sample["seq_out_pred"] if not gt else sample["seq_out_gt"]
-            root_traj = (sample[..., 1, :2] + sample[..., 2, :2]) / 2
+            root_traj = (sample[..., 13, :2] + sample[..., 14, :2]) / 2
 
             if len(root_traj.shape) == 4:
                 assert root_traj.shape[0] == 1, str(root_traj.shape)
@@ -136,15 +162,18 @@ def total_distance_dist(eval, gt=False):
 
     return a, c
 
-def load_pickle(path):
-    with open(path, "rb") as fp:
-        return pickle.load(fp)
-
 abs_distances = {}
 cum_distances = {}
 
-for k, v in test_files.items():
-    abs_distances[k], cum_distances[k] = total_distance_dist(load_pickle(data_dir + v))
+for name, (file, _) in eval_files.items():
+    abs_distances[name], cum_distances[name] = total_distance_dist(
+        load_results(data_dir + file)
+    )
+
+# the ground-truth futures are the same in every eval file
+abs_distances["GT"], cum_distances["GT"] = total_distance_dist(
+    load_results(data_dir + eval_files["Ours"][0]), gt=True
+)
 
 values = {
     k : {

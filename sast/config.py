@@ -26,7 +26,7 @@ cfg.experiment.study_name = "default"
 cfg.data = CfgNode()
 
 # constants
-cfg.data.n_joints = 29
+cfg.data.n_joints = 17
 cfg.data.fps = 25
 
 # settings for BampData
@@ -48,7 +48,10 @@ cfg.data.object_embeds = 8
 
 cfg.data.n_chunks = 10
 
-cfg.data.hik_location = "data/"
+# root of the BAM-poses dataset, i.e. the directory that contains one
+# subdirectory per recording (A/, B/, C/, D/) plus the scene geometry
+# (A_scene/, ...). See the README on how to obtain it.
+cfg.data.bam_location = "data/dataset/"
 
 
 ###############
@@ -59,7 +62,7 @@ cfg.loader = CfgNode()
 
 cfg.loader.dataset_path = "data/"
 
-cfg.loader.dataset = "hik"
+cfg.loader.dataset = "bamp"
 
 cfg.loader.batch_size = 32
 
@@ -79,7 +82,9 @@ cfg.unet.time_embed_dim = 64
 
 cfg.unet.primary_tcn = CfgNode()
 
-cfg.unet.primary_tcn.channels = [29*3 * 2, 128, 256, 512]
+# the input sequence is concatenated onto the noisy sample along the joint
+# axis, hence the factor 2 (see MultiTcnDiffusion.forward)
+cfg.unet.primary_tcn.channels = [cfg.data.n_joints * 3 * 2, 128, 256, 512]
 cfg.unet.primary_tcn.kernel_size = 5
 cfg.unet.primary_tcn.dropout = 0.2
 cfg.unet.primary_tcn.norm_mode = "group_norm"  # options: none, group_norm
@@ -91,7 +96,7 @@ cfg.unet.primary_tcn.padding_mode = "zero"
 
 cfg.unet.others_tcn = CfgNode()
 
-cfg.unet.others_tcn.channels = [29 * 3, 128, 128, 128]
+cfg.unet.others_tcn.channels = [cfg.data.n_joints * 3, 128, 128, 128]
 cfg.unet.others_tcn.kernel_size = 3
 cfg.unet.others_tcn.dropout = 0.2
 cfg.unet.others_tcn.norm_mode = "group_norm"  # options: none, group_norm

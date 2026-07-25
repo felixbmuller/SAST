@@ -17,6 +17,32 @@ from sast.model.unet import MultiUNet
 logger = logging.getLogger("pytorch_lightning")
 
 
+def _assert_supported_legacy_cfg(cfg):
+    """
+    Reject checkpoints from research-code variants this implementation dropped.
+    """
+    if "tcn" not in cfg:
+        return
+
+    expected = {
+        "extra_channels_in_seq": True,
+        "loss_on_raw_input": True,
+        "loss_only_out_seq": True,
+        "uses_local": False,
+        "use_dct": False,
+        "trajectory_mode": "none",
+        "transform": "none",
+    }
+
+    for key, want in expected.items():
+        if key in cfg.tcn:
+            got = cfg.tcn[key]
+            assert got == want, (
+                f"checkpoint was trained with cfg.tcn.{key}={got!r}, but this "
+                f"implementation only supports {want!r}"
+            )
+
+
 class MultiTcnDiffusion(pl.LightningModule):
     def __init__(self, cfg, data_mean=None, data_std=None):
         super().__init__()
@@ -32,6 +58,8 @@ class MultiTcnDiffusion(pl.LightningModule):
 
         if isinstance(cfg, dict):
             self.cfg = cfg = CfgNode(cfg)
+
+        _assert_supported_legacy_cfg(cfg)
 
         if data_std is not None:
             data_std = np.where(data_std == 0.0, 1.0, data_std)
@@ -73,6 +101,11 @@ class MultiTcnDiffusion(pl.LightningModule):
 
         # convert params from 0.8 to 0.14
         params = dict(**cfg.diffusion)
+        # legacy checkpoints carry the pre-0.14 diffusers flag in their
+        # hyperparameters; recent DDPMScheduler versions do not accept it
+        assert not params.pop(
+            "predict_epsilon", False
+        ), "Can only predict pose, not noise residual"
         params["prediction_type"] = "sample"
 
         self.noise_scheduler = DDPMScheduler(**params)

@@ -1,5 +1,5 @@
 data:
-  hik_location: data/
+  bam_location: data/dataset/
 
 loader:
   dataset_path: data/

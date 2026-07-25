@@ -1,10 +1,9 @@
 import logging
 
-from einops import rearrange
 import numpy as np
 import torch
 
-from hik.transforms.transforms import undo_normalization_to_seq
+from bam_poses.transforms.transforms import undo_normalization_to_seq
 
 from sast.data.constants import normalize_frame
 from sast.data.multi_person_data import preprocess_sequences
@@ -14,29 +13,32 @@ from sast.data import constants
 def multi_eval_fn(
     self,
     n_samples,
-    data,
+    persons_in,
+    masks_in,
+    scene,
+    frame,
+    n_in,
+    n_out,
+    pids,
+    extra,
+    n_out_internal=None,
     **kwargs,
 ):
     """
-    Callback for generating results. The model predicts the
-    data in here. This is compatible with the way Humans in Kitchens provides data.
+    Callback for generating results. The model predicts the data in here.
+    This is the signature bam_poses.eval.Evaluation.execute() calls.
 
-    :param persons_in: {n_persons x n_in x 29 x 3}
+    :param persons_in: {n_persons x n_in x 17 x 3}
     :param masks_in: {n_persons x n_in}
-    :param scene: {hik.data.scene.Scene}
-    :param frame: {int}
+    :param scene: {bam_poses.data.scene.Scene}
+    :param frame: {int} last observed frame
     :param n_in: {int}
+    :param n_out: {int} number of frames that have to be predicted
     :param pids: {List[int]}
+    :param extra: {dict} additional info provided by the Evaluation, e.g. the action
+
+    :return {n_samples x n_persons x n_out x 17 x 3}
     """
-
-    persons_in = rearrange(data["Poses3d_in"], "t p j d -> p t j d")
-    masks_in = rearrange(data["Masks_in"], "t p -> p t")
-    kitchen = data["kitchen"]
-    frames_in = data["frames_in"]
-    n_out = data["n_out"]
-    pids = data["pids"]
-
-    frame = frames_in[-1]
 
     # Avoid completely missing persons
 
@@ -58,7 +60,7 @@ def multi_eval_fn(
         masks_in,
         None,
         None,
-        kitchen,
+        kitchen=scene.kitchen,
         object_frame=frame,
         normalize_frame=normalize_frame,
         max_persons=persons_in.shape[0],
@@ -89,7 +91,8 @@ def multi_eval_fn(
 
     # n_out needs to be devisibl by 8
     # n_out_aligned = math.ceil((n_in + n_out) / 8) * 8 - n_in
-    n_out_internal = 279
+    if n_out_internal is None:
+        n_out_internal = 279
 
     out_dict = self.forward(
         torch_data, truncate_pred_seq=True, n_out=n_out_internal, **kwargs
@@ -115,6 +118,4 @@ def multi_eval_fn(
                 seq, data["mus"][ip], data["Rs"][ip]
             )
 
-    out = rearrange(global_pred_seq, "1 p t j d -> t p j d")
-
-    return out
+    return global_pred_seq

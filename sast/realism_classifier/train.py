@@ -1,3 +1,5 @@
+import sast.env  # noqa: F401  isort:skip -- must precede torch/numba imports
+
 from pathlib import Path
 from statistics import mean
 import sys

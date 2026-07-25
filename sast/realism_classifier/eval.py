@@ -1,3 +1,4 @@
+import sast.env  # noqa: F401  isort:skip -- must precede torch/numba imports
 
 import os
 from sast.realism_classifier.data import load_dataset

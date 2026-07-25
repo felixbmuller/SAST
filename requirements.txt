@@ -4,10 +4,14 @@ torch==2.4.1
 tqdm==4.66.5
 fire==0.6.0
 einops==0.8.0
-git+https://github.com/jutanke/hik.git
+numba==0.61.0
 git+https://github.com/jutanke/ndms.git
 scipy==1.14.1
 diffusers==0.30.3
 yacs==0.1.8
 tensorboard==2.18.0
+matplotlib==3.9.2
+seaborn==0.13.2
+pandas==2.2.3
+torchmetrics==1.4.2
 -e .

@@ -1,3 +1,5 @@
+import sast.env  # noqa: F401  isort:skip -- must precede torch/numba imports
+
 from types import SimpleNamespace
 import logging
 import multiprocessing
@@ -9,16 +11,15 @@ import numpy as np
 import torch.utils.data as data
 from tqdm import tqdm
 from fire import Fire
-from einops import rearrange
 
-from hik.data.scene import Scene
-from hik.data.utils import get_splits as hik_get_splits
-from hik.transforms.transforms import (
+from bam_poses.data.scene import Scene
+from bam_poses.data.utils import get_splits as bam_get_splits
+from bam_poses.transforms.transforms import (
     normalize,
     apply_normalization_to_seq,
     apply_normalization_to_points3d,
 )
-from hik.data.constants import activity2index
+from bam_poses.data.constants import activity2index
 
 from sast.data.basis_point_representation import BasisPointSet
 from sast.data.constants import (
@@ -53,14 +54,7 @@ def _init_worker(kitchen):
 
 
 def _load_scene(dataset: str, cfg) -> Scene:
-    data_location = cfg.data.hik_location
-
-    return Scene.load_from_paths(
-        dataset,
-        data_location + "/poses/",
-        data_location + "/scenes/",
-        data_location + "/body_models/",
-    )
+    return Scene(dataset, data_location=cfg.data.bam_location)
 
 
 def _memmap(save_path, name, shape):
@@ -74,7 +68,7 @@ def pad_sequence(poses, exists):
     constant pads the input sequence *in-place* with the first previous non-masked value. If the sequence is at the start, the next non-mask value
     after it is used
 
-    poses: (t 29 3)
+    poses: (t 17 3)
     exists: (t)
     """
 
@@ -82,7 +76,7 @@ def pad_sequence(poses, exists):
         return
 
     if np.logical_not(np.any(exists)):
-        poses[:] = np.zeros((29, 3))
+        poses[:] = np.zeros((17, 3))
         return
 
     filled = exists.copy()
@@ -144,7 +138,7 @@ def preprocess_sequences(
 
     Parmeters
     ---------
-    persons: (p t 29 3)
+    persons: (p t 17 3)
         poses, can be either a whole sequence or only input sequence
     present: (p t)
         mask
@@ -329,11 +323,11 @@ class MultiPersonData(data.Dataset):
         """
         Build the dataset for one scene directly into memory-mapped .npy files.
 
-        Nothing is ever held in RAM in full: the sliding windows are sliced out of
-        the Scene arrays on demand, processed `splits_per_batch` at a time, and
-        written straight to their final location. Peak memory is therefore set by
-        `splits_per_batch` alone (roughly splits_per_batch * n_persons * 5 MB) and
-        does not grow with seq_offset.
+        Nothing is ever held in RAM in full: the sliding windows are cut out of
+        the Scene one at a time (Scene.get_window), processed `splits_per_batch`
+        at a time, and written straight to their final location. Peak memory is
+        therefore set by `splits_per_batch` alone (roughly
+        splits_per_batch * n_persons * 5 MB) and does not grow with seq_offset.
 
         Parameters
         ----------
@@ -353,25 +347,35 @@ class MultiPersonData(data.Dataset):
 
         scene = _load_scene(dataset, cfg)
 
-        starts = hik_get_splits(
+        starts = bam_get_splits(
             scene.frames, length=length, stepsize=cfg.data.seq_offset
         )
         starts = starts[shard::n_shards]
 
+        # (n_persons x n_frames), indexed like scene.frames
+        exists = scene.exists_matrix()
+        frame2index = scene.group.frame2index
+
         # Check finiteness once over the frames we are about to use, rather than
         # over a fully materialised (and heavily duplicated) array of windows.
-        used_frames = np.zeros(len(scene.masks), dtype="bool")
+        used_frames = np.zeros(exists.shape[1], dtype="bool")
         for start_frame in starts:
-            used_frames[start_frame : start_frame + length] = True
-        assert np.isfinite(
-            scene.poses3d[(scene.masks != 0) & used_frames[:, None]]
-        ).all()
+            i0 = frame2index[start_frame]
+            used_frames[i0 : i0 + length] = True
+        for person in scene.persons:
+            cols = np.array([frame2index[f] for f in person.frames], dtype="int64")
+            keep = np.all(person.masks > 0.5, axis=-1) & used_frames[cols]
+            assert np.isfinite(person.poses[keep]).all(), f"pid {person.pid}"
 
         # The number of output rows varies per window (only persons that are
-        # present at least once are kept), but it depends solely on the mask
-        # array, which is small enough to scan up front.
+        # present at least once are kept), but it depends solely on the exists
+        # matrix, which is small enough to scan up front.
         total = sum(
-            int(np.any(scene.masks[s : s + length] != 0, axis=0).sum())
+            int(
+                np.any(
+                    exists[:, frame2index[s] : frame2index[s] + length], axis=1
+                ).sum()
+            )
             for s in starts
         )
 
@@ -430,17 +434,15 @@ class MultiPersonData(data.Dataset):
 
             for i in tqdm(range(0, len(starts), splits_per_batch)):
 
-                tasks = [
-                    (
-                        rearrange(scene.poses3d[s : s + length], "t p j d -> p t j d"),
-                        rearrange(scene.masks[s : s + length], "t p -> p t"),
-                        np.arange(s, s + length),
-                        rearrange(
-                            scene.activities[s : s + length], "t p act -> p t act"
-                        ),
+                tasks = []
+
+                for s in starts[i : i + splits_per_batch]:
+                    # (p t j d), (p t), (p t act) -- already in the layout
+                    # preprocess_sequences expects
+                    poses, present, activities = scene.get_window(s, length)
+                    tasks.append(
+                        (poses, present, np.arange(s, s + length), activities)
                     )
-                    for s in starts[i : i + splits_per_batch]
-                ]
 
                 # keep every worker busy even when the batch is small
                 chunksize = max(1, min(8, len(tasks) // (cfg.loader.num_workers * 4)))

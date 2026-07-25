@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from fire import Fire
 from einops import rearrange, repeat
 
 from sast.modules.timestep import TimestepModule
@@ -139,7 +138,3 @@ class MultiUNet(nn.Module):
         )
 
         return out
-
-
-if __name__ == "__main__":
-    Fire(visualize_model)

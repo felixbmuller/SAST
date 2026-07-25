@@ -24,7 +24,7 @@ def pad_sequence(poses, exists):
     constant pads the input sequence *in-place* with the first previous non-masked value. If the sequence is at the start, the next non-mask value
     after it is used
 
-    poses: (t 29 3)
+    poses: (t 17 3)
     exists: (t)
     """
 
@@ -32,7 +32,7 @@ def pad_sequence(poses, exists):
         return
 
     if np.logical_not(np.any(exists)):
-        poses[:] = np.zeros((29, 3))
+        poses[:] = np.zeros((17, 3))
         return
 
     filled = exists.copy()
@@ -203,7 +203,9 @@ def get_velocity(results, gt=False):
 
             #seq = np.concatenate([sample["seq_in"][:, -1:], seq], axis=1) # p t j d
 
-            global_directional_movement = np.mean(seq[..., [1, 2], :][..., :2], axis=-2)
+            global_directional_movement = np.mean(
+                seq[..., [13, 14], :][..., :2], axis=-2
+            )
 
             diff = np.diff(global_directional_movement, axis=-2) # directional velocity
 
@@ -233,7 +235,7 @@ def get_local_velocity(results, gt=False):
 
             seq = sample["seq_out_pred" if not gt else "seq_out_gt"]
 
-            global_mean_pose = np.mean(seq[..., [1, 2], :], axis=-2)
+            global_mean_pose = np.mean(seq[..., [13, 14], :], axis=-2)
 
             seq = seq - global_mean_pose[..., np.newaxis, :]
 

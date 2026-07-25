@@ -5,7 +5,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch.utils.data as data
 
-from hik.data.constants import activity2index
+from bam_poses.data.constants import activity2index
 
 from sast.data.multi_person_data import MultiPersonData
 
