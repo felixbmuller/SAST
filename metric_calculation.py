@@ -7,12 +7,17 @@ import logging
 import pickle
 import scipy
 
-from hik.eval import EvalNDMS, Evaluation, load_results, save_results
+from hik.eval import load_results, save_results
+from sast.ndms_eval import NDMSEvaluator
 from sast.realism_classifier.model import RealismClassifier
 from sast.metrics import calculate_ndms_k, calculate_means, unique_ratios
 from sast.utils import startup
 
 data_dir = "output/"
+
+# Root of the hik dataset (contains poses/, scenes/, body_models/), same layout
+# that eval.py passes to hik.eval.Evaluator. Needed to build the NDMS databases.
+hik_data_path = "data/"
 
 test_files = {
     "SiMLPe": "mlp_D_test_seq.pkl",
@@ -53,43 +58,32 @@ print(means_df)
 ## NDMS-based metrics
 
 # Apply NDMS calculation
-def eval_ndms(results_path, n_out=250, dataset="D"):
-
-    startup()
+def eval_ndms(ndms_evaluator, results_path):
 
     results_path = Path(results_path)
 
     results = load_results(results_path)
 
-    logging.info("Creating evaluation object")
+    logging.info("Running NDMS for %s", results_path.name)
 
-    ev = Evaluation(
-        dataset=dataset,
-        tmp_dir="tmp_sast/",
-        n_in=25,
-        n_out=n_out,
-    )
-
-    logging.info("Creating EvalNDMS object")
-
-    ndms = EvalNDMS(ev)
-
-    logging.info("Running NDMS")
-
-    avg_ours, agv_indices = ndms.run(results)
+    avg_ndms, avg_indices = ndms_evaluator.run(results)
 
     logging.info("Saving results")
 
     save_path = results_path.parent / f"{results_path.stem}_ndms.pkl"
     save_path_idxs = results_path.parent / f"{results_path.stem}_ndms_indices.pkl"
 
-    save_results(save_path, avg_ours)
-    save_results(save_path_idxs, agv_indices)
+    save_results(save_path, avg_ndms)
+    save_results(save_path_idxs, avg_indices)
 
     logging.info("done")
 
+startup()
+
+ndms_evaluator = NDMSEvaluator(dataset="D", data_path=hik_data_path, cache_dir="tmp_sast/")
+
 for k, v in test_files.items():
-    eval_ndms(data_dir + v)
+    eval_ndms(ndms_evaluator, data_dir + v)
 
 
 eval_files = {
@@ -123,7 +117,7 @@ def total_distance_dist(eval, gt=False):
     for cat, data in eval.items():
         for sample in data:
             sample = sample["seq_out_pred"] if not gt else sample["seq_out_gt"]
-            root_traj = (sample[..., 13, :2] + sample[..., 14, :2]) / 2
+            root_traj = (sample[..., 1, :2] + sample[..., 2, :2]) / 2
 
             if len(root_traj.shape) == 4:
                 assert root_traj.shape[0] == 1, str(root_traj.shape)
@@ -149,7 +143,7 @@ def load_pickle(path):
 abs_distances = {}
 cum_distances = {}
 
-for k, v in test_files:
+for k, v in test_files.items():
     abs_distances[k], cum_distances[k] = total_distance_dist(load_pickle(data_dir + v))
 
 values = {
